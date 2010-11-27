@@ -1092,12 +1092,11 @@ var all_tests = {
       collection.insert({'a':1}, function(err, ids) {
         collection.find({}, function(err, cursor) {
           cursor.toArray(function(err, items) {
-            // Should fail if called again (cursor should be closed)
+            // Should not fail if called again (rewind should be called)
             cursor.toArray(function(err, items) {
-              test.ok(err instanceof Error);
-              test.equal("Cursor is closed", err.message);
+              test.ok(err == null);
   
-              // Each should allow us to iterate over the entries due to cache
+              // Each should also not fail since rewind will be called
               cursor.each(function(err, item) {
                 if(item != null) {
                   test.equal(1, item.a);
@@ -1120,8 +1119,8 @@ var all_tests = {
           cursor.each(function(err, item) {
             if(item == null) {
               cursor.toArray(function(err, items) {
-                test.ok(err instanceof Error);
-                test.equal("Cursor is closed", err.message);
+								//Should not return an error since cursor.rewind will be called
+                test.ok(err == null);
   
                 // Let's close the db
                 finished_test({test_to_a_after_each:'ok'});
@@ -1919,7 +1918,214 @@ var all_tests = {
       });
     });
   },
+
+  test_batchSize_exceptions : function() {
+    client.collection('test_batchSize_exceptions', function(err, collection) {
+      collection.insert({'a':1}, function(err, docs) {});
+      collection.find(function(err, cursor) {
+        cursor.batchSize('not-an-integer', function(err, cursor) {
+          test.ok(err instanceof Error);
+          test.equal("batchSize requires an integer", err.message);
+        });
+      });
   
+      collection.find(function(err, cursor) {
+        cursor.nextObject(function(err, doc) {
+	        cursor.nextObject(function(err, doc) {
+	          cursor.batchSize(1, function(err, cursor) {
+	            test.ok(err instanceof Error);
+	            test.equal("Cursor is closed", err.message);
+	            // Let's close the db
+	            finished_test({test_batchSize_exceptions:'ok'});
+	          });
+          });
+        });
+      });
+  
+      collection.find(function(err, cursor) {
+        cursor.close(function(err, cursor) {
+          cursor.batchSize(1, function(err, cursor) {
+            test.ok(err instanceof Error);
+            test.equal("Cursor is closed", err.message);
+          });
+        });
+      });
+    });
+  },
+
+	test_not_multiple_batch_size : function() {
+    client.collection('test_not_multiple_batch_size', function(err, collection) {
+			var records = 11;
+			var batchSize = 2;
+			var docs = [];
+      for(var i = 0; i < records; i++) {
+				docs.push({'a':i});
+	    }
+
+			collection.insert(docs, function() {
+	      collection.find({}, {batchSize : batchSize}, function(err, cursor) {
+					cursor.fetchNextBatch(function(err, items) {
+						test.equal(batchSize, items.length);
+
+						cursor.fetchNextBatch(function(err, items) {
+							test.equal(batchSize, items.length);
+							//check that the internal data is still intact
+							test.equal(batchSize, cursor.items.length - batchSize);
+
+							//test batch size modification on the fly
+							var newBatchSize = 4;
+							cursor.batchSize(newBatchSize);
+
+							cursor.fetchNextBatch(function(err, items) {
+								test.equal(newBatchSize, items.length);
+								//check that the internal data is still intact
+								test.equal(newBatchSize, cursor.items.length - 2*batchSize);
+
+								cursor.fetchNextBatch(function(err, items) {
+									test.equal(records, cursor.items.length);
+
+								  cursor.fetchNextBatch(function(err, items) {
+   	  							test.ok(items == null);
+	    							test.equal(records, cursor.items.length);
+										finished_test({test_not_multiple_batch_size:'ok'});
+									});
+								});
+							});
+						});
+					});
+				});
+			});
+		});
+	},
+	
+  test_multiple_batch_size : function() {
+		client.collection('test_multiple_batch_size', function(err, collection) {
+			//test with the last batch that is a multiple of batchSize
+			var records = 6;
+			var batchSize = 3;
+			var docs = [];
+      for(var i = 0; i < records; i++) {
+				docs.push({'a':i});
+	    }
+
+			collection.insert(docs, function() {
+	      collection.find({}, {batchSize : batchSize}, function(err, cursor) {
+					cursor.fetchNextBatch(function(err, items) {
+						test.equal(batchSize, items.length);
+
+						cursor.fetchNextBatch(function(err, items) {
+							test.equal(batchSize, items.length);
+							//check that the internal data is still intact
+							test.equal(batchSize, cursor.items.length - batchSize);
+							test.equal(records, cursor.items.length);
+
+							cursor.fetchNextBatch(function(err, items) {
+  							test.ok(items == null);
+								test.equal(records, cursor.items.length);
+								finished_test({test_multiple_batch_size:'ok'});
+							});
+						});
+					});
+				});
+			});
+		});
+	},
+
+  test_limit_greater_than_batch_size : function() {
+		client.collection('test_limit_greater_than_batch_size', function(err, collection) {
+			var limit = 4;
+			var records = 10;
+			var batchSize = 2;
+			var docs = [];
+      for(var i = 0; i < records; i++) {
+				docs.push({'a':i});
+	    }
+
+			collection.insert(docs, function() {
+				collection.find({}, {batchSize : batchSize, limit : limit}, function(err, cursor) {
+					cursor.fetchNextBatch(function(err, items) {
+						test.equal(batchSize, items.length);
+
+						cursor.fetchNextBatch(function(err, items) {
+              test.equal(batchSize, items.length);
+							test.equal(limit, cursor.items.length);
+
+							cursor.fetchNextBatch(function(err, items) {
+  							test.ok(items == null);
+								test.equal(limit, cursor.items.length);
+								finished_test({test_limit_greater_than_batch_size:'ok'});
+							});
+						});
+					});
+				});
+			});
+		});
+	},
+
+	test_limit_less_than_batch_size : function () {
+		client.collection('test_limit_less_than_batch_size', function(err, collection) {
+			var limit = 2;
+			var records = 10;
+			var batchSize = 4;
+			var docs = [];
+      for(var i = 0; i < records; i++) {
+				docs.push({'a':i});
+	    }
+
+			collection.insert(docs, function() {
+				collection.find({}, {batchSize : batchSize, limit : limit}, function(err, cursor) {
+					cursor.fetchNextBatch(function(err, items) {
+						test.equal(limit, items.length);
+						test.equal(limit, cursor.items.length);
+
+						cursor.fetchNextBatch(function(err, items) {
+              test.ok(items == null);
+              test.equal(limit, cursor.items.length);
+  						finished_test({test_limit_less_than_batch_size:'ok'});
+						});
+ 					});
+				});
+			});
+		});
+	},
+
+
+  test_nextObj_with_batch_size : function () {
+		client.collection('test_nextObj_with_batch_size', function(err, collection) {
+			var records = 10;
+			var docs = [];
+      for(var i = 0; i < records; i++) {
+				docs.push({'a':i});
+	    }
+
+			collection.insert(docs, function() {
+				//Use batchsize of 2 initially since using 1 will close the cursor automatically
+				collection.find({}, {batchSize : 2}, function(err, cursor) {
+					cursor.nextObject(function(err, item) {
+						test.ok(item != null);
+						test.equal(1, cursor.items.length);
+
+  					cursor.batchSize(1).nextObject(function(err, item) {
+	  					test.ok(item != null);
+		  				test.equal(0, cursor.items.length);
+
+          		cursor.nextObject(function(err, item) {
+    						test.ok(item != null);
+	    					test.equal(0, cursor.items.length);
+
+            		cursor.nextObject(function(err, item) {
+      						test.ok(item != null);
+	      					test.equal(0, cursor.items.length);
+			  					finished_test({test_nextObj_with_batch_size:'ok'});
+    	  				});
+   	  				});
+   					});
+ 					});
+				});
+			});
+		});
+	},
+
   test_limit_skip_chaining : function() {
     client.createCollection('test_limit_skip_chaining', function(err, collection) {
       for(var i = 0; i < 10; i++) { collection.insert({'x':1}); }
