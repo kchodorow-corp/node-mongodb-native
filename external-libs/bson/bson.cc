@@ -13,6 +13,7 @@
 
 #include "bson.h"
 #include "long.h"
+#include "timestamp.h"
 #include "objectid.h"
 #include "binary.h"
 #include "code.h"
@@ -281,6 +282,28 @@ uint32_t BSON::serialize(char *serialized_object, uint32_t index, Handle<Value> 
     BSON::write_int32((serialized_object + index + 4), long_obj->high_bits);
     // Adjust the index
     index = index + 8;
+  } else if(Timestamp::HasInstance(value)) {
+      // printf("============================================= -- serialized::::long\n");    
+      // Save the string at the offset provided
+      *(serialized_object + index) = BSON_DATA_TIMESTAMP;
+      // Adjust writing position for the first byte
+      index = index + 1;
+      // Convert name to char*
+      ssize_t len = DecodeBytes(name, BINARY);
+      ssize_t written = DecodeWrite((serialized_object + index), len, name, BINARY);
+      // Add null termiation for the string
+      *(serialized_object + index + len) = '\0';    
+      // Adjust the index
+      index = index + len + 1;
+
+      // Unpack the object and encode
+      Local<Object> obj = value->ToObject();
+      Timestamp *timestamp_obj = Timestamp::Unwrap<Timestamp>(obj);
+      // Write the content to the char array
+      BSON::write_int32((serialized_object + index), timestamp_obj->low_bits);
+      BSON::write_int32((serialized_object + index + 4), timestamp_obj->high_bits);
+      // Adjust the index
+      index = index + 8;
   } else if(ObjectID::HasInstance(value) || (value->IsObject() && value->ToObject()->HasRealNamedProperty(String::New("toHexString")))) {
     // printf("============================================= -- serialized::::object_id\n");    
     // Save the string at the offset provided
@@ -457,7 +480,7 @@ uint32_t BSON::serialize(char *serialized_object, uint32_t index, Handle<Value> 
     BSON::write_int32((serialized_object + index), int_value);
     // Adjust the index
     index = index + 4;
-  } else if(value->IsNull()) {
+  } else if(value->IsNull() || value->IsUndefined()) {
     // printf("============================================= -- serialized::::null\n");
     // Save the string at the offset provided
     *(serialized_object + index) = BSON_DATA_NULL;
@@ -573,11 +596,11 @@ uint32_t BSON::serialize(char *serialized_object, uint32_t index, Handle<Value> 
     uint32_t regexp_size = 0;
     // Fetch the string for the regexp
     Local<String> str = value->ToString();    
-    len = DecodeBytes(str, BINARY);
+    len = DecodeBytes(str, UTF8);
     // Let's define the buffer that contains the regexp string
     char *data = (char *)malloc(len);
     // Write the data to the buffer from the string object
-    written = DecodeWrite(data, len, str, BINARY);    
+    written = DecodeWrite(data, len, str, UTF8);    
     // Locate the last pointer of the string
     char *options_ptr = strrchr(data, '/');
     // Copy out the code string
@@ -585,12 +608,12 @@ uint32_t BSON::serialize(char *serialized_object, uint32_t index, Handle<Value> 
     char *reg_exp_string = (char *)malloc(reg_exp_string_length + 1);
     memcpy(reg_exp_string, (data + 1), reg_exp_string_length);
     *(reg_exp_string + reg_exp_string_length) = '\0';
+
     // Write the string to the data
     memcpy((serialized_object + index), reg_exp_string, reg_exp_string_length + 1);
     // Adjust index
     index = index + reg_exp_string_length + 1;
-    
-    // printf("========================= regexp::[%d]:%s\n", reg_exp_string_length, reg_exp_string);
+        
     // Check if we have options
     // if((options_ptr - data) < len) {
     uint32_t options_string_length = (len - (reg_exp_string_length + 2));
@@ -789,7 +812,7 @@ uint32_t BSON::calculate_object_size(Handle<Value> value) {
     uint32_t regexp_size = 0;
     // Fetch the string for the regexp
     Local<String> str = value->ToString();    
-    ssize_t len = DecodeBytes(str, BINARY);
+    ssize_t len = DecodeBytes(str, UTF8);
     // Calculate the space needed for the regexp: size of string - 2 for the /'ses +2 for null termiations
     object_size = object_size + len;
   } else if(value->IsArray()) {
@@ -969,6 +992,32 @@ Handle<Value> BSON::deserialize(char *data, bool is_array_item) {
       }          
       // Free up the memory
       free(string_name);
+    } else if(type == BSON_DATA_TIMESTAMP) {
+      // Read the null terminated index String
+      char *string_name = BSON::extract_string(data, index);
+      if(string_name == NULL) return VException("Invalid C String found.");
+      // Let's create a new string
+      index = index + strlen(string_name) + 1;
+      // Handle array value if applicable
+      uint32_t insert_index = 0;
+      if(is_array_item) {
+        insert_index = atoi(string_name);
+      }      
+      
+      // Decode the integer value
+      int64_t value = 0;
+      memcpy(&value, (data + index), 8);      
+      // Adjust the index for the size of the value
+      index = index + 8;
+            
+      // Add the element to the object
+      if(is_array_item) {
+        return_array->Set(Number::New(insert_index), BSON::decodeTimestamp(value));
+      } else {
+        return_data->Set(String::New(string_name), BSON::decodeTimestamp(value));
+      }
+      // Free up the memory
+      free(string_name);            
     } else if(type == BSON_DATA_LONG) {
       // Read the null terminated index String
       char *string_name = BSON::extract_string(data, index);
@@ -1107,17 +1156,18 @@ Handle<Value> BSON::deserialize(char *data, bool is_array_item) {
 
       // Length variable
       int32_t length_regexp = 0;
+      int32_t start_index = index;
       char chr;
-
+      
       // Locate end of the regexp expression \0
       while((chr = *(data + index + length_regexp)) != '\0') {
         length_regexp = length_regexp + 1;
       }
-            
+
       // Contains the reg exp
-      char *reg_exp = (char *)malloc(length_regexp * sizeof(char) + 1);
+      char *reg_exp = (char *)malloc(length_regexp * sizeof(char) + 2);
       // Copy the regexp from the data to the char *
-      memcpy(reg_exp, (data + index), (length_regexp + 1));      
+      memcpy(reg_exp, (data + index), (length_regexp + 1));
       // Adjust the index to skip the first part of the regular expression
       index = index + length_regexp + 1;
             
@@ -1141,7 +1191,7 @@ Handle<Value> BSON::deserialize(char *data, bool is_array_item) {
       char *reg_exp_string = (char *)malloc((length_regexp + options_length)*sizeof(char) + 2 + 2);
       *(reg_exp_string) = '\0';
       strncat(reg_exp_string, "/", 1);      
-      strncat(reg_exp_string, reg_exp, length_regexp);      
+      strncat(reg_exp_string, reg_exp, length_regexp);
       strncat(reg_exp_string, "/", 1);      
       strncat(reg_exp_string, options, options_length);
 
@@ -1440,6 +1490,13 @@ Handle<Value> BSON::decodeLong(int64_t value) {
   return scope.Close(long_obj);      
 }
 
+Handle<Value> BSON::decodeTimestamp(int64_t value) {
+  HandleScope scope;
+  
+  Local<Value> argv[] = {Number::New(value)};
+  Handle<Value> timestamp_obj = Timestamp::constructor_template->GetFunction()->NewInstance(1, argv);    
+  return scope.Close(timestamp_obj);      
+}
 
 // Search for 0 terminated C string and return the string
 char* BSON::extract_string(char *data, uint32_t offset) {
@@ -1547,6 +1604,7 @@ extern "C" void init(Handle<Object> target) {
   Binary::Initialize(target);
   Code::Initialize(target);
   DBRef::Initialize(target);
+  Timestamp::Initialize(target);
 }
 
 // NODE_MODULE(bson, BSON::Initialize);

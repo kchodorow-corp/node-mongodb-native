@@ -5,7 +5,6 @@ test = require("assert");
 var Db = require('../lib/mongodb').Db,
   GridStore = require('../lib/mongodb').GridStore,
   Chunk = require('../lib/mongodb').Chunk,
-  Long = require('../lib/mongodb').Long,
   Server = require('../lib/mongodb').Server,
   ServerPair = require('../lib/mongodb').ServerPair,
   Code = require('../lib/mongodb/bson/bson').Code;
@@ -348,6 +347,8 @@ var all_tests = {
                     collection.insert({x:1}, function(err, ids) {
                       collection.update({x:1}, {"$set":{x:2}}, {'safe':true}, function(err, document) {
                       });
+                      
+                      collection.update({x:1}, {"$set":{x:2}}, {'safe':true});
 
                       collection.update({y:1}, {"$set":{y:2}}, {'safe':true}, function(err, document) {
                         test.ok(err instanceof Error);
@@ -417,6 +418,22 @@ var all_tests = {
         });
       });
     });
+  },
+
+  test_failing_insert_due_to_unique_index : function () {
+    client.createCollection('test_failing_insert_due_to_unique_index', function(err, r) {
+      client.collection('test_failing_insert_due_to_unique_index', function(err, collection) {
+        collection.ensureIndex([['a', 1 ]], true, function(err, indexName) {
+          collection.insert({a:2}, {safe: true}, function(err, r) {
+            test.ok(err == null);
+            collection.insert({a:2}, {safe: true}, function(err, r) {
+              test.ok(err != null);
+              finished_test({test_failing_insert_due_to_unique_index:'ok'});
+            })
+          })
+        })
+      })
+    })
   },
 
   // Test multiple document insert
@@ -1008,6 +1025,22 @@ var all_tests = {
     });
   },
 
+  test_utf8_regex : function() {
+    var regexp = /foobaré/;
+  
+    client.createCollection('test_utf8_regex', function(err, collection) {
+      collection.insert({'b':regexp}, function(err, ids) {
+        collection.find({}, {'fields': ['b']}, function(err, cursor) {
+          cursor.toArray(function(err, items) {
+            test.equal(("" + regexp), ("" + items[0].b));
+            // Let's close the db
+            finished_test({test_utf8_regex:'ok'});
+          });
+        });
+      });
+    });
+  },
+
   // Use some other id than the standard for inserts
   test_non_oid_id : function() {
     client.createCollection('test_non_oid_id', function(err, collection) {
@@ -1130,6 +1163,51 @@ var all_tests = {
         });
       });
     });
+  },
+  
+  test_stream_records_calls_data_the_right_number_of_times : function() {
+    client.createCollection('test_stream_records', function(err, collection) {
+      test.ok(collection instanceof Collection);
+      collection.insert([{'a':1}, {'b' : 2}, {'c' : 3}, {'d' : 4}, {'e' : 5}], function(err, ids) {
+        collection.find({}, {'limit' : 3}, function(err, cursor) {
+          var stream = cursor.streamRecords(); 
+          var callsToEnd = 0;
+          stream.addListener('end', function() { 
+            finished_test({test_stream_records_calls_data_the_right_number_of_times:'ok'});
+          });
+          
+          var callsToData = 0;
+          stream.addListener('data',function(data){ 
+            callsToData += 1;
+            test.ok(callsToData <= 3);
+          }); 
+        });
+      });
+    });    
+  },
+
+  test_stream_records_calls_end_the_right_number_of_times : function() {
+    client.createCollection('test_stream_records', function(err, collection) {
+      test.ok(collection instanceof Collection);
+      collection.insert([{'a':1}, {'b' : 2}, {'c' : 3}, {'d' : 4}, {'e' : 5}], function(err, ids) {
+        collection.find({}, {'limit' : 3}, function(err, cursor) {
+          var stream = cursor.streamRecords(function(er,item) {}); 
+          var callsToEnd = 0;
+          stream.addListener('end', function() { 
+            callsToEnd += 1;
+            test.equal(1, callsToEnd);
+            setTimeout(function() {
+              // Let's close the db
+              if (callsToEnd == 1) {
+                finished_test({test_stream_records_calls_end_the_right_number_of_times:'ok'});
+              }
+            }.bind(this), 1000);
+          });
+          
+          stream.addListener('data',function(data){ /* nothing here */ }); 
+        });
+      });
+    });    
   },
   
   test_where : function() {
@@ -1422,9 +1500,9 @@ var all_tests = {
   
   test_save_long : function() {
     client.createCollection('test_save_long', function(err, collection) {
-      collection.insert({'x':Long.fromNumber(9223372036854775807)});
+      collection.insert({'x':client.bson_serializer.Long.fromNumber(9223372036854775807)});
       collection.findOne(function(err, doc) {
-        test.ok(Long.fromNumber(9223372036854775807).equals(doc.x));
+        test.ok(client.bson_serializer.Long.fromNumber(9223372036854775807).equals(doc.x));
         // Let's close the db
         finished_test({test_save_long:'ok'});
       });
@@ -3010,6 +3088,29 @@ var all_tests = {
     });
   },
   
+  // checks if 8 bit values will be preserved in gridstore
+  test_gs_check_high_bits : function() {
+      var gridStore = new GridStore(client, "test_gs_check_high_bits", "w");
+      var data = new Buffer(255);
+      for(var i=0; i<255; i++){
+          data[i] = i;
+      }
+    
+      gridStore.open(function(err, gridStore) {
+        gridStore.write(data, function(err, gridStore) {
+          gridStore.close(function(err, result) {
+            // Assert that we have overwriten the data
+            GridStore.read(client, 'test_gs_check_high_bits', function(err, fileData) {
+              // change testvalue into a string like "0,1,2,...,255"
+              test.equal(Array.prototype.join.call(data),
+                      Array.prototype.join.call(new Buffer(fileData, "binary")));
+              finished_test({test_gs_check_high_bits:'ok'});
+            });
+          });
+        });
+      });
+    },
+  
   test_change_chunk_size : function() {
     var gridStore = new GridStore(client, "test_change_chunk_size", "w");
     gridStore.open(function(err, gridStore) {
@@ -3861,7 +3962,6 @@ var all_tests = {
         collection.findAndModify({'a':3}, [], {'$set':{'b':3}}, {'new': true, remove: true}, function(err, updated_doc) {
           test.equal(3, updated_doc.a);
           test.equal(2, updated_doc.b);
-          finished_test({test_find_and_modify_a_document:'ok'});
         })
       });
 
@@ -3869,8 +3969,18 @@ var all_tests = {
       collection.findAndModify({'a':4}, [], {'$set':{'b':3}}, {'new': true, upsert: true}, function(err, updated_doc) {
         test.equal(4, updated_doc.a);
         test.equal(3, updated_doc.b);
-        finished_test({test_find_and_modify_a_document:'ok'});
-      })
+      });
+
+      // Test selecting a subset of fields
+      collection.insert({a: 100, b: 101}, function (err, ids) {
+        collection.findAndModify({'a': 100}, [], {'$set': {'b': 5}}, {'new': true, fields: {b: 1}}, function (err, updated_doc) {
+          test.equal(2, Object.keys(updated_doc).length);
+          test.equal(ids[0]['_id'].toHexString(), updated_doc._id.toHexString());
+          test.equal(5, updated_doc.b);
+          test.equal("undefined", typeof updated_doc.a);
+          finished_test({test_find_and_modify_a_document:'ok'});
+        });
+      });
     });
   },
   
@@ -4079,13 +4189,27 @@ var all_tests = {
     client.createCollection('test_should_correctly_do_upsert', function(err, collection) {
       var id = new client.bson_serializer.ObjectID(null)
       var doc = {_id:id, a:1};
-      
       collection.update({"_id":id}, doc, {upsert:true}, function(err, doc) {
+        test.equal(null, err);
         collection.findOne({"_id":id}, function(err, doc) {
           test.equal(1, doc.a);
+        });
+      });
+      id = new client.bson_serializer.ObjectID(null)
+      doc = {_id:id, a:2};
+      collection.update({"_id":id}, doc, {safe:true, upsert:true}, function(err, doc) {
+        test.equal(null, err);
+        collection.findOne({"_id":id}, function(err, doc) {
+          test.equal(2, doc.a);
+        });
+      });
+      collection.update({"_id":id}, doc, {safe:true, upsert:true}, function(err, doc) {
+        test.equal(null, err);
+        collection.findOne({"_id":id}, function(err, doc) {
+          test.equal(2, doc.a);
           finished_test({test_should_correctly_do_upsert:'ok'});
         });
-      });      
+      });
     });
   },
   
@@ -4110,7 +4234,103 @@ var all_tests = {
         });
       });
     });
-  }
+  },
+  
+  test_streaming_function_with_limit_for_fetching : function() {
+    var docs = []
+    
+    for(var i = 0; i < 3000; i++) {
+      docs.push({'a':i})
+    }
+
+    client.createCollection('test_streaming_function_with_limit_for_fetching', function(err, collection) {
+      test.ok(collection instanceof Collection);
+
+      collection.insertAll(docs, function(err, ids) {        
+        collection.find({}, function(err, cursor) {
+          // Execute find on all the documents
+          var stream = cursor.streamRecords({fetchSize:1000}); 
+          var callsToEnd = 0;
+          stream.addListener('end', function() { 
+            finished_test({test_streaming_function_with_limit_for_fetching:'ok'});
+          });
+
+          var callsToData = 0;
+          stream.addListener('data',function(data){ 
+            callsToData += 1;
+            test.ok(callsToData <= 3000);
+          }); 
+        });        
+      });
+    });    
+  }, 
+  
+  test_to_json_for_long : function() {
+    client.createCollection('test_to_json_for_long', function(err, collection) {
+      test.ok(collection instanceof Collection);
+
+      // collection.insertAll([{value: client.bson_serializer.Long.fromNumber(32222432)}], function(err, ids) {
+      collection.insertAll([{value: client.bson_serializer.Long.fromNumber(32222432)}], function(err, ids) {
+        collection.findOne({}, function(err, item) {
+          test.equal("32222432", item.value.toJSON())
+          finished_test({test_to_json_for_long:'ok'});
+        });
+      });
+    });        
+  },
+  
+  test_failed_connection_caught : function() {
+    var fs_client = new Db('admin_test_4', new Server("127.0.0.1", 27117, {auto_reconnect: false}));
+    fs_client.bson_deserializer = client.bson_deserializer;
+    fs_client.bson_serializer = client.bson_serializer;
+    fs_client.pkFactory = client.pkFactory;  
+    fs_client.open(function(err, fs_client) {
+      test.ok(err != null)
+      finished_test({test_failed_connection_caught:'ok'});
+    })
+  },
+  
+  test_insert_and_update_no_callback : function() {
+    client.createCollection('test_insert_and_update_no_callback', function(err, collection) {
+      // Insert the update
+      collection.insert({i:1}, {safe:true})
+      // Update the record
+      collection.update({i:1}, {"$set":{i:2}}, {safe:true})
+      // Locate document
+      collection.findOne({}, function(err, item) {
+        test.equal(2, item.i)
+        finished_test({test_insert_and_update_no_callback:'ok'});
+      });        
+    })
+  },
+  
+  test_insert_and_query_timestamp : function() {
+    client.createCollection('test_insert_and_query_timestamp', function(err, collection) {
+      // Insert the update
+      collection.insert({i:client.bson_serializer.Timestamp.fromNumber(100), j:client.bson_serializer.Long.fromNumber(200)}, {safe:true})
+      // Locate document
+      collection.findOne({}, function(err, item) {
+        test.equal(100, item.i.toNumber())
+        test.equal(200, item.j.toNumber())
+        
+        finished_test({test_insert_and_query_timestamp:'ok'});
+      });        
+    })
+  },
+  
+  test_insert_and_query_undefined : function() {
+    client.createCollection('test_insert_and_query_undefined', function(err, collection) {
+      // Insert the update
+      collection.insert({i:undefined}, {safe:true})
+      // Locate document
+      collection.findOne({}, function(err, item) {
+        test.equal(null, item.i)
+        
+        finished_test({test_insert_and_query_undefined:'ok'});
+      });        
+    })
+  }  
+  
 };
 
 /*******************************************************************************************************
